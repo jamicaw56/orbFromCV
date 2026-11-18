@@ -19,9 +19,13 @@ option(ORB_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer"
 if(ORB_SANITIZE)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
-        add_link_options(-fsanitize=address,undefined)
+        # Linker flag variables rather than add_link_options(), which needs CMake 3.13.
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address,undefined")
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address,undefined")
     elseif(MSVC)
         # MSVC has ASan only (no UBSan); it is incompatible with /RTC1 in Debug.
+        # To run the binaries, the ASan runtime directory must be on PATH, e.g.
+        # <VS>/VC/Tools/MSVC/<ver>/bin/Hostx64/x64 (otherwise exit code 0xc0000135).
         add_compile_options(/fsanitize=address)
         string(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
     else()
