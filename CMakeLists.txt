@@ -12,6 +12,23 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra")
 endif()
 
+# Build every target with AddressSanitizer + UndefinedBehaviorSanitizer.
+# Off by default; CI runs the test suite with it on (see .github/workflows/ci.yml).
+option(ORB_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
+if(ORB_SANITIZE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
+        add_link_options(-fsanitize=address,undefined)
+    elseif(MSVC)
+        # MSVC has ASan only (no UBSan); it is incompatible with /RTC1 in Debug.
+        add_compile_options(/fsanitize=address)
+        string(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+    else()
+        message(WARNING "ORB_SANITIZE is not supported for ${CMAKE_CXX_COMPILER_ID}; ignoring")
+    endif()
+endif()
+
 # Core algorithm sources, shared by the CLI executable and the test suite
 set(LIB_SOURCES
     orb_core.cpp
