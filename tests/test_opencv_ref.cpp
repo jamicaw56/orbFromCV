@@ -217,7 +217,7 @@ TEST_CASE("opencv_ref: detectFAST without NMS finds the same corners as cv2.FAST
     CHECK(ours == ref);
 }
 
-TEST_CASE("opencv_ref: detectFAST with NMS matches cv2.FAST corners and scores (#24)") {
+TEST_CASE("opencv_ref: detectFAST with NMS matches cv2.FAST corners and scores") {
     Image8U scene = loadScene();
     std::vector<uint8_t> bin = readBinary(fixturePath("fast-t20-nms.bin"));
     CHECK_EQ(static_cast<int>(bin.size() / 8), opencv_ref::FAST_COUNT_NMS);
@@ -232,9 +232,7 @@ TEST_CASE("opencv_ref: detectFAST with NMS matches cv2.FAST corners and scores (
     detectFAST(scene, kps, opencv_ref::FAST_THRESHOLD, true);
     std::set<XY> ours = fastSet(kps);
     reportSetDiff(ours, ref);
-    // The raw corners are identical (test above); NMS keeps different ones
-    // because the score that ranks neighbours is not OpenCV's (#24).
-    CHECK_XFAIL(ours == ref, "#24");
+    CHECK(ours == ref);
 
     // Where both agree on a corner, the score should be OpenCV's max-threshold
     // score; this port computes a SAD-style sum instead (#24).
@@ -249,7 +247,7 @@ TEST_CASE("opencv_ref: detectFAST with NMS matches cv2.FAST corners and scores (
         sameScore += oursScored.count(r) > 0;
     }
     std::fprintf(stderr, "    common corners: %d, identical scores: %d\n", common, sameScore);
-    CHECK_XFAIL(common > 0 && sameScore == common, "#24");
+    CHECK(common > 0 && sameScore == common);
 }
 
 // ---------------------------------------------------------------------------
@@ -366,13 +364,13 @@ TEST_CASE("opencv_ref: ORB::detectAndCompute keypoints spatially match cv2.ORB (
     std::fprintf(stderr, "    within 2 px on any octave: %d / %d\n", anyOctave, opencv_ref::ORB_DETECT_COUNT);
     for (int o = 0; o < 8; ++o)
         std::fprintf(stderr, "    octave %d: OpenCV %3d, ours %3d, matched %3d\n", o, refPerOctave[o], oursPerOctave[o], matchedPerOctave[o]);
-    // Floor: 8.8% (44 / 500) measured on dev at #32, 9.2% (46 / 500) after #20:
-    // 17/109 on octave 0 and a similar rate on octaves 1-3, none on octaves
-    // 4-7. Octave 0 has no resize, so the FAST score and Harris pre-filter
-    // (#24) drive the low rate everywhere; the resize mapping (#40) adds a
-    // shift on octaves >= 1 and the blur (#39) flips descriptor bits. Raise
-    // this floor in each fixing PR.
-    CHECK(rate >= 0.05);
+    // Floor history: 8.8% on dev at #32; 9.2% after #20; 33.6% (168 / 500)
+    // after #24, with every one of the 109 octave-0 keypoints matched and a
+    // rate falling with the octave (41/90, 13/75, 5/63, then none). Octave 0
+    // has no resize, so what separates octaves >= 1 is the resize mapping
+    // (#40); the blur (#39) only flips descriptor bits. Raise this floor in
+    // each fixing PR.
+    CHECK(rate >= 0.30);
 }
 
 // ---------------------------------------------------------------------------
