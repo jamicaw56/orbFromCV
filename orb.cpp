@@ -191,6 +191,17 @@ void ORB::detectAndCompute(const Image8U& image, std::vector<KeyPoint>& keypoint
     }
     if (stageTimings) stageTimings->push_back({"orientation", orientationMs});
 
+    // Scale keypoints to level-0 (original image) coordinates now, as OpenCV
+    // does before computing descriptors: computeOrbDescriptors maps them back
+    // into their level with 1 / layerScale[octave]. HarrisResponses and
+    // ICAngles above read level coordinates, so this must happen between the
+    // two stages (issue #34).
+    {
+        for (auto& kp : allKeypoints) {
+            kp.pt *= layerScale[kp.octave];
+        }
+    }
+
     // 4. Prepare pattern from bit_pattern_31_
     double patternInitMs = 0.0;
     std::vector<Point2i> pattern;
@@ -254,16 +265,6 @@ void ORB::detectAndCompute(const Image8U& image, std::vector<KeyPoint>& keypoint
         stageTimings->push_back({"gaussian_blur", blurMs});
         stageTimings->push_back({"descriptors", descriptorsMs});
     }
-
-    // Finally, scale keypoints back to the original image resolution
-    double finalizeMs = 0.0;
-    {
-        ScopedAccumulator timer(&finalizeMs);
-        for (auto& kp : allKeypoints) {
-            kp.pt *= layerScale[kp.octave];
-        }
-    }
-    if (stageTimings) stageTimings->push_back({"finalize", finalizeMs});
 
     keypoints = allKeypoints;
 }

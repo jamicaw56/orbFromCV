@@ -1,5 +1,10 @@
 #include "orb.hpp"
+#include "orb_core.hpp"
+#include "image_utils.hpp"
+#include "orb_pattern.hpp"
 #include "test_framework.hpp"
+#include <cmath>
+#include <cstdint>
 
 namespace {
 
@@ -181,7 +186,7 @@ TEST_CASE("ORB::detectAndCompute: stage timings cover every pipeline stage with 
     CHECK(!keypoints.empty()); // otherwise only the first 3 stages would be recorded
     const std::vector<std::string> expectedStages = {
         "pyramid", "fast_detection", "harris_scoring", "orientation",
-        "pattern_init", "gaussian_blur", "descriptors", "finalize",
+        "pattern_init", "gaussian_blur", "descriptors",
     };
     CHECK_EQ(stageTimings.size(), expectedStages.size());
     for (size_t i = 0; i < stageTimings.size() && i < expectedStages.size(); ++i) {
@@ -200,4 +205,64 @@ TEST_CASE("ORB::detectAndCompute: stage timings on an empty image record nothing
     orb.detectAndCompute(image, keypoints, descriptors, &stageTimings);
 
     CHECK(stageTimings.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor location on pyramid levels >= 1 (issue #34)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Seeded texture with enough corners on every level.
+Image8U makeTexture(int w, int h, uint32_t seed) {
+    Image8U img(w, h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            seed = seed * 1664525u + 1013904223u;
+            img.at(y, x) = static_cast<uint8_t>((seed >> 24) ^ (((x / 16 + y / 16) & 1) ? 0x80 : 0));
+        }
+    return img;
+}
+
+} // namespace
+
+TEST_CASE("ORB::detectAndCompute: octave-1 descriptors are sampled at the keypoint location") {
+    const int W = 256, H = 256;
+    Image8U image = makeTexture(W, H, 7);
+
+    const float scaleFactor = 1.2f;
+    ORB orb(300, scaleFactor, 2, 31, 0, 2, ORB::HARRIS_SCORE, 31, 20);
+    std::vector<KeyPoint> keypoints;
+    Image8U descriptors;
+    orb.detectAndCompute(image, keypoints, descriptors);
+
+    // Rebuild level 1 exactly as the pipeline does: resize from level 0, then blur.
+    Image8U level1;
+    resizeBilinear(image, level1,
+                   static_cast<int>(std::round(W / scaleFactor)),
+                   static_cast<int>(std::round(H / scaleFactor)));
+    gaussianBlur7x7(level1, level1);
+
+    std::vector<Rect> layerInfo = {{0, 0, W, H}, {0, 0, level1.cols, level1.rows}};
+    std::vector<float> layerScale = {1.0f, scaleFactor};
+    const Point2i* pattern0 = reinterpret_cast<const Point2i*>(bit_pattern_31_);
+    std::vector<Point2i> pattern(pattern0, pattern0 + 512);
+
+    // computeOrbDescriptors takes keypoints in level-0 coordinates, which is
+    // what detectAndCompute returns: recomputing the descriptor of every
+    // octave-1 keypoint from them must reproduce the pipeline's bytes.
+    int octave1 = 0, identical = 0;
+    for (size_t i = 0; i < keypoints.size(); ++i) {
+        if (keypoints[i].octave != 1) continue;
+        ++octave1;
+        std::vector<KeyPoint> one = {keypoints[i]};
+        Image8U expected(32, 1);
+        computeOrbDescriptors(level1, layerInfo, layerScale, one, expected, pattern, 32, 2);
+        bool same = true;
+        for (int k = 0; k < 32; ++k) same = same && expected.at(0, k) == descriptors.at(static_cast<int>(i), k);
+        identical += same;
+    }
+
+    CHECK(octave1 > 50);
+    CHECK_EQ(identical, octave1);
 }
