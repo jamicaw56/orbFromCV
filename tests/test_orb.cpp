@@ -1,10 +1,13 @@
 #include "orb.hpp"
 #include "orb_core.hpp"
+#include "fast_detector.hpp"
 #include "image_utils.hpp"
 #include "orb_pattern.hpp"
 #include "test_framework.hpp"
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <map>
 #include <cstdint>
 
 namespace {
@@ -19,6 +22,17 @@ Image8U makeDotGrid(int size, uint8_t low, uint8_t high) {
     for (int y = 30; y < size - 30; y += 20)
         for (int x = 30; x < size - 30; x += 20)
             img.at(y, x) = high;
+    return img;
+}
+
+// Seeded texture with enough corners on every level.
+Image8U makeTexture(int w, int h, uint32_t seed) {
+    Image8U img(w, h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            seed = seed * 1664525u + 1013904223u;
+            img.at(y, x) = static_cast<uint8_t>((seed >> 24) ^ (((x / 16 + y / 16) & 1) ? 0x80 : 0));
+        }
     return img;
 }
 
@@ -122,7 +136,10 @@ TEST_CASE("ORB::detectAndCompute: results are deterministic across runs") {
 }
 
 TEST_CASE("ORB::detectAndCompute: nfeatures caps the number of keypoints returned") {
-    Image8U image = makeDotGrid(128, 30, 220);
+    // A texture, not the dot grid: identical dots have identical Harris
+    // responses, and OpenCV's retainBest keeps every point tied with the
+    // n-th one (see the next test).
+    Image8U image = makeTexture(128, 128, 5);
 
     ORB orb(5, 1.2f, 1, 16, 0, 2, ORB::HARRIS_SCORE, 31, 20);
     std::vector<KeyPoint> keypoints;
@@ -131,6 +148,18 @@ TEST_CASE("ORB::detectAndCompute: nfeatures caps the number of keypoints returne
     orb.detectAndCompute(image, keypoints, descriptors);
 
     CHECK(keypoints.size() <= 5);
+}
+
+TEST_CASE("ORB::detectAndCompute: points tied with the nfeatures-th response are kept, as in OpenCV") {
+    Image8U image = makeDotGrid(128, 30, 220); // every dot scores the same
+
+    ORB orb(5, 1.2f, 1, 16, 0, 2, ORB::HARRIS_SCORE, 31, 20);
+    std::vector<KeyPoint> keypoints;
+    Image8U descriptors;
+    orb.detectAndCompute(image, keypoints, descriptors);
+
+    CHECK(keypoints.size() >= 5);
+    for (const auto& kp : keypoints) CHECK_EQ(kp.response, keypoints[0].response);
 }
 
 TEST_CASE("ORB::detectAndCompute: multi-level pyramid runs without crashing") {
@@ -212,20 +241,6 @@ TEST_CASE("ORB::detectAndCompute: stage timings on an empty image record nothing
 // Descriptor location on pyramid levels >= 1 (issue #34)
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// Seeded texture with enough corners on every level.
-Image8U makeTexture(int w, int h, uint32_t seed) {
-    Image8U img(w, h);
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            seed = seed * 1664525u + 1013904223u;
-            img.at(y, x) = static_cast<uint8_t>((seed >> 24) ^ (((x / 16 + y / 16) & 1) ? 0x80 : 0));
-        }
-    return img;
-}
-
-} // namespace
 
 TEST_CASE("ORB::detectAndCompute: octave-1 descriptors are sampled at the keypoint location") {
     const int W = 256, H = 256;
@@ -309,4 +324,44 @@ TEST_CASE("ORB::detectAndCompute: small edgeThreshold keeps every reader inside 
             CHECK(ly >= minBorder && ly < rows - minBorder);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Harris pre-filtering (#24): OpenCV keeps the best 2 * featuresNum corners by
+// FAST score before computing Harris, so a weak FAST corner can never be
+// selected however strong its Harris response.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ORB::detectAndCompute: Harris only runs on the best 2*featuresNum FAST corners") {
+    Image8U image = makeTexture(256, 256, 3);
+    const int nfeatures = 40, threshold = 20, edge = 31;
+
+    // Reference: FAST corners of level 0 inside the border, ranked by FAST score.
+    std::vector<KeyPoint> fast;
+    detectFAST(image, fast, threshold, true);
+    std::vector<float> responses;
+    std::map<std::pair<int, int>, float> fastResponse;
+    for (const auto& k : fast) {
+        if (k.pt.x < edge || k.pt.x >= image.cols - edge || k.pt.y < edge || k.pt.y >= image.rows - edge) continue;
+        responses.push_back(k.response);
+        fastResponse[{static_cast<int>(k.pt.x), static_cast<int>(k.pt.y)}] = k.response;
+    }
+    std::sort(responses.begin(), responses.end(), std::greater<float>());
+    CHECK(responses.size() > 4 * nfeatures); // the pre-filter must actually cut
+    const float cutoff = responses[2 * nfeatures - 1];
+
+    ORB orb(nfeatures, 1.2f, 1, edge, 0, 2, ORB::HARRIS_SCORE, 31, threshold);
+    std::vector<KeyPoint> kps;
+    Image8U desc;
+    orb.detectAndCompute(image, kps, desc);
+    CHECK(!kps.empty());
+
+    int belowCutoff = 0;
+    for (const auto& k : kps) {
+        auto it = fastResponse.find({static_cast<int>(k.pt.x), static_cast<int>(k.pt.y)});
+        CHECK(it != fastResponse.end());
+        if (it != fastResponse.end() && it->second < cutoff) ++belowCutoff;
+    }
+    std::fprintf(stderr, "    selected keypoints whose FAST score is below the 2N cutoff: %d / %zu\n", belowCutoff, kps.size());
+    CHECK_EQ(belowCutoff, 0);
 }

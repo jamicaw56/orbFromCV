@@ -11,8 +11,9 @@
 
 namespace {
 
-// Reference 3x3 non-maximal suppression: a point survives unless some other
-// point within the 3x3 window has a strictly greater response (ties kept).
+// Reference 3x3 non-maximal suppression, OpenCV's rule: a point survives only
+// if its response is strictly greater than every other point's in the 3x3
+// window, so tied neighbours are both dropped.
 std::vector<KeyPoint> bruteForceNms(const std::vector<KeyPoint>& raw) {
     std::vector<KeyPoint> kept;
     for (size_t i = 0; i < raw.size(); ++i) {
@@ -21,7 +22,7 @@ std::vector<KeyPoint> bruteForceNms(const std::vector<KeyPoint>& raw) {
             if (i == j) continue;
             if (std::abs(raw[i].pt.x - raw[j].pt.x) <= 1.0f &&
                 std::abs(raw[i].pt.y - raw[j].pt.y) <= 1.0f &&
-                raw[j].response > raw[i].response) {
+                raw[j].response >= raw[i].response) {
                 isMax = false;
             }
         }
@@ -66,7 +67,7 @@ double detectMillis(const Image8U& img) {
 
 } // namespace
 
-TEST_CASE("detectFAST: NMS matches a brute-force 3x3 reference, including ties") {
+TEST_CASE("detectFAST: NMS matches a brute-force 3x3 reference, ties are both dropped") {
     Image8U img(64, 64);
     for (auto& v : img.data) v = 50;
     // Isolated dots, uneven blobs and mirror-symmetric pairs (equal responses).
@@ -85,14 +86,20 @@ TEST_CASE("detectFAST: NMS matches a brute-force 3x3 reference, including ties")
     CHECK(sameKeypointSet(suppressed, bruteForceNms(raw)));
 
     // Make sure the tie path is really exercised: some neighbouring raw
-    // corners must share a response and both survive.
-    int tiedSurvivors = 0;
+    // corners share a response, and no two survivors are 3x3 neighbours.
+    int tiedRawPairs = 0, adjacentSurvivors = 0;
+    for (size_t i = 0; i < raw.size(); ++i)
+        for (size_t j = i + 1; j < raw.size(); ++j)
+            if (std::abs(raw[i].pt.x - raw[j].pt.x) <= 1.0f && std::abs(raw[i].pt.y - raw[j].pt.y) <= 1.0f &&
+                raw[i].response == raw[j].response)
+                ++tiedRawPairs;
     for (size_t i = 0; i < suppressed.size(); ++i)
         for (size_t j = i + 1; j < suppressed.size(); ++j)
             if (std::abs(suppressed[i].pt.x - suppressed[j].pt.x) <= 1.0f &&
                 std::abs(suppressed[i].pt.y - suppressed[j].pt.y) <= 1.0f)
-                ++tiedSurvivors;
-    CHECK(tiedSurvivors > 0);
+                ++adjacentSurvivors;
+    CHECK(tiedRawPairs > 0);
+    CHECK_EQ(adjacentSurvivors, 0);
 }
 
 TEST_CASE("detectFAST with NMS scales ~linearly with image area, not quadratically") {
@@ -297,4 +304,33 @@ TEST_CASE("detectFAST without NMS matches a brute-force FAST-9 oracle on noise a
     CHECK(totalRef > 500); // the images must actually have corners
     CHECK_EQ(totalMissing, 0);
     CHECK_EQ(totalExtra, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Corner score definition (#24): OpenCV's cornerScore<16> is the largest
+// threshold at which the pixel is still a FAST-9 corner.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("detectFAST: response is the largest threshold at which the pixel is still a corner") {
+    const int t = 20;
+    int checked = 0, mismatched = 0;
+    for (uint32_t seed = 11; seed <= 13; ++seed) {
+        Image8U img = seededNoise(80, 60, seed, 40, 170);
+        std::vector<KeyPoint> kps;
+        detectFAST(img, kps, t, false);
+        for (const auto& k : kps) {
+            const int x = static_cast<int>(k.pt.x), y = static_cast<int>(k.pt.y);
+            int maxT = t;
+            while (maxT + 1 <= 255 && isFast9Corner(img, x, y, maxT + 1)) ++maxT;
+            ++checked;
+            if (k.response != static_cast<float>(maxT)) {
+                if (mismatched < 3)
+                    std::fprintf(stderr, "    (%d,%d): response %.0f, largest corner threshold %d\n", x, y, k.response, maxT);
+                ++mismatched;
+            }
+        }
+    }
+    std::fprintf(stderr, "    corners checked: %d, score mismatches: %d\n", checked, mismatched);
+    CHECK(checked > 200);
+    CHECK_EQ(mismatched, 0);
 }

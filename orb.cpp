@@ -44,6 +44,20 @@ static int patternReach() {
     return reach;
 }
 
+// KeyPointsFilter::retainBest, as in OpenCV: keep the n best by response.
+// Points tied with the n-th response are kept too, so the result can exceed n
+// (FAST scores are small integers, so ties at the cut are common).
+static void retainBest(std::vector<KeyPoint>& keypoints, int n) {
+    if (n < 0 || keypoints.size() <= static_cast<size_t>(n)) return;
+    if (n == 0) { keypoints.clear(); return; }
+    auto greater = [](const KeyPoint& a, const KeyPoint& b) { return a.response > b.response; };
+    std::nth_element(keypoints.begin(), keypoints.begin() + n - 1, keypoints.end(), greater);
+    const float ambiguous = keypoints[n - 1].response;
+    auto newEnd = std::partition(keypoints.begin() + n, keypoints.end(),
+                                 [ambiguous](const KeyPoint& k) { return k.response >= ambiguous; });
+    keypoints.resize(static_cast<size_t>(newEnd - keypoints.begin()));
+}
+
 static void initializeOrbPattern(const Point2i* pattern0, std::vector<Point2i>& pattern, int ntuples, int tupleSize, int poolSize) {
     std::mt19937 rng(0x12345678); // Fixed seed to ensure consistent descriptors
     std::uniform_int_distribution<int> dist(0, poolSize - 1);
@@ -156,16 +170,11 @@ void ORB::detectAndCompute(const Image8U& image, std::vector<KeyPoint>& keypoint
         // Apply Harris scoring to get the best 'featuresNum' points
         if (scoreType == HARRIS_SCORE && !filteredKeypoints.empty()) {
             ScopedAccumulator timer(&harrisScoringMs);
+            // As OpenCV: keep only the best 2 * featuresNum corners by FAST
+            // score before Harris, then the best featuresNum by Harris (#24).
+            retainBest(filteredKeypoints, 2 * featuresNum);
             HarrisResponses(imagePyramid[level], layerInfo, filteredKeypoints, HARRIS_BLOCK_SIZE, 0.04f);
-
-            // Sort descending by response
-            std::sort(filteredKeypoints.begin(), filteredKeypoints.end(),
-                      [](const KeyPoint& a, const KeyPoint& b) { return a.response > b.response; });
-
-            // Retain top features
-            if (filteredKeypoints.size() > static_cast<size_t>(featuresNum)) {
-                filteredKeypoints.resize(featuresNum);
-            }
+            retainBest(filteredKeypoints, featuresNum);
         }
 
         allKeypoints.insert(allKeypoints.end(), filteredKeypoints.begin(), filteredKeypoints.end());

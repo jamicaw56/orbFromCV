@@ -21,6 +21,10 @@ class ORB {
 public:
     enum ScoreType { HARRIS_SCORE = 0, FAST_SCORE = 1 };
 
+    // nfeatures: at most this many keypoints, as in OpenCV: per level the best
+    // 2 * n by FAST score are kept for Harris scoring and then the best n by
+    // Harris; points tied with the n-th response are kept too, so the total
+    // can exceed nfeatures on images with many identical corners.
     // edgeThreshold: keypoints closer than this to a level's border are dropped.
     // Unlike OpenCV, pyramid levels are not padded, so the effective border is
     // at least max(ceil(patchSize / 2 * sqrt(2)), 19): the reach of the
